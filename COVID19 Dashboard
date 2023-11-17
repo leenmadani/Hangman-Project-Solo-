@@ -1,0 +1,935 @@
+---
+title: "COVID-19 Case Fatality Rate and its Correlation With Socioeconomic Indicators from Years 2020-2022"
+authors: "ChatDHT"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    vertical_layout: scroll
+    source_code: embed
+---
+  
+```{r setup, include=FALSE}
+library(flexdashboard)
+
+# Install necessary packages for data collection and cleaning
+#install.packages("dplyr")
+#install.packages("tidyverse")
+#install.packages("httr")
+#install.packages("jsonlite")
+#install.packages("webstats")
+#install.packages("corrplot)
+#install.packages("plotly") 
+
+
+# Load necessary packages
+library(flexdashboard)
+library(dplyr)
+library(tidyverse)
+library(httr)
+library(jsonlite)
+library(wbstats)
+library(corrplot)
+library(plotly)  # World Bank API package
+
+#### Step 1: Download COVID-19 data using direct download
+covid_data_url <- "https://covid19.who.int/WHO-COVID-19-global-data.csv"
+# Read the covid file in from the covid_data_url and assign it to covid_data
+covid_data <- read.csv(covid_data_url)
+# Examine the variables with glimpse()
+glimpse(covid_data)
+# Check for missing values
+missing_covid <- covid_data[!complete.cases(covid_data), ] # will select rows where at least one column has a missing value; Namibia two letter country code is NA and so we can see all observations of Namibia as an output for this code
+
+
+# Investigate the countries and regions to get a sense of how we want to do the country classification and dataset merging later on
+table(covid_data$WHO_region) # what is the " Other" region?
+other_covid <- covid_data[covid_data$WHO_region == "Other", ] # view the "Other" observations
+table(covid_data$Country)
+countries_covid <-  covid_data %>%
+  group_by(Country) %>%
+  summarise (n = n())
+
+
+# What about dates? Is there 2019 date? 
+min(covid_data$ï..Date_reported) # earliest date reported is 2020-01-03 
+max(covid_data$ï..Date_reported) # latest date reported is in 2023; therefore should filter these dates
+
+
+# Rename the column of date to remove the unusual symbol ï 
+names(covid_data)[names(covid_data) == "ï..Date_reported"] <- "Date_reported"
+
+# Clean covid dataset  by filtering out dates starting with 2023, renaming Namibia's country code from NA to NAM to avoid false positive NA results, and rename the date's name column
+
+covid_data1 <- covid_data %>%
+  filter(!startsWith(Date_reported, "2023")) %>%
+  mutate(Country_code = ifelse(Country == "Namibia", "NAM", Country_code))
+
+# Do more cleaning and group the dataset by countries and years (2020, 2021, and 2022)
+# Slice(n()) will keep the last entry for each group because cumulative cases and deaths keep on adding up after each new case reported
+covid_data2 <- covid_data1 %>%
+  mutate(Year = as.integer(substr(Date_reported, 1, 4))) %>% #extract the first 4 characters from the "Date_reported" column to help group by year
+  select(-Date_reported, -New_cases, -New_deaths, -Country_code) %>%
+  group_by(Country, Year) %>%
+  slice(n()) %>% 
+  filter(Country != "Other")
+
+
+#### Add cases per year column 
+
+# Initialize an empty vector to store the results
+cases_per_year <- numeric()
+
+# Loop through each unique country
+for (country in unique(covid_data2$Country)) {
+  country_data <- covid_data2[covid_data2$Country == country, ]
+  
+  # Calculate cases per year
+  cases_2020 <- country_data$Cumulative_cases[country_data$Year == 2020]
+  cases_2021 <- country_data$Cumulative_cases[country_data$Year == 2021] - cases_2020
+  cases_2022 <- country_data$Cumulative_cases[country_data$Year == 2022] - cases_2021
+  
+  # Append the results to the cases_per_year vector
+  cases_per_year <- c(cases_per_year, cases_2020, cases_2021, cases_2022)
+}
+
+# Add the cases_per_year column to the covid_data2 dataset
+covid_data2$Cases_per_year <- cases_per_year
+
+### Add deaths_per_year column 
+
+# Initialize an empty vector to store the results
+deaths_per_year <- numeric()
+
+# Loop through each unique country
+for (country in unique(covid_data2$Country)) {
+  country_data <- covid_data2[covid_data2$Country == country, ]
+  
+  # Calculate cases per year
+  deaths_2020 <- country_data$Cumulative_deaths[country_data$Year == 2020]
+  deaths_2021 <- country_data$Cumulative_deaths[country_data$Year == 2021] - deaths_2020
+  deaths_2022 <- country_data$Cumulative_deaths[country_data$Year == 2022] - deaths_2021
+  
+  # Append the results to the cases_per_year vector
+  deaths_per_year <- c(deaths_per_year, deaths_2020, deaths_2021, deaths_2022)
+}
+
+# Add the cases_per_year column to the covid_data2 dataset
+covid_data2$Deaths_per_year <- deaths_per_year
+
+
+
+# Calculate case fatality rate
+covid_data3 <- covid_data2 %>%
+  mutate(Cumulative_CFR = (Cumulative_deaths / Cumulative_cases)*100) 
+
+
+covid_metrics_upto2022 <- covid_data3 %>%
+  filter(Year %in% 2022) 
+
+
+#### Step 2: Access World Bank socioeconomic data by using the wbstats package
+
+#' Search through the indicators to find indicators that will be useful in our analysis
+# Go online using the website to scroll through the indicators, country classifications, etc..
+# https://datacatalog.worldbank.org/ then select World Development Indicators which gives you access to a nice visualization of the databank
+
+# Start by downloading an updated list of the World Bank data catalog from the World Bank API and explore the wbstats package
+# wbdatacatalog() shows error; out of date version of the data catalog API.
+# wb_cache () shows updated list of all info present in wbstats, including countries, all indicators,sources, languages available, regions, etc..
+wb_cache <- wb_cache()  # helps to identify the codes for each indicator to extract it from wb_data
+wb_list <- wb_cachelist # wb_cachelist gives the same result as wb_cache()
+glimpse(wb_cache)       # wb_cache has 8 lists, with each list constituting of multiple data types
+
+# Manually view indicators you are interested by using wb_search() function
+unemploy_inds<- wb_search("unemployment")                               # this will all show all indicators related to employment
+povemply_inds <- wb_search(pattern = "poverty|unemployment|employment") # can search multiple indicators at a time
+# dataframe() will turn the indicators into a data frame for better visualization and analysis
+indicator_list <- data.frame(  
+  indicator_id = wb_cache$indicators$indicator_id,
+  indicator = wb_cache$indicators$indicator,
+  indicator_desc = wb_cache$indicators$indicator_desc
+)
+
+#' Preferred method to investigate and select indicators is through going the World development Indicator databank referenced above or the indicator_list.
+#' The online databank categorizes the indicators and is user-friendly, allowing the user to scroll easily and explore the indicators present.
+#' The wb_data() function downloads requested information using the World Bank API.
+#' Select those you are interested in and download the data as an csv file.
+#' The csv file will show all the codes, in the "Series Code" column, with their respective indicator.
+
+# Preliminary selection of indicators is shown below and renamed for easier referencing later throughout the analysis.
+my_indicators <- c(
+  "gdp" = "NY.GDP.MKTP.CD",
+  "gni" = "NY.GNP.MKTP.CD",
+  "health_expend_gdp" = "SH.XPD.CHEX.GD.ZS",
+  "life_expectancy" = "SP.DYN.LE00.IN",  
+  "pop_total" = "SP.POP.TOTL",
+  "pop_male" = "SP.POP.TOTL.MA.IN",      
+  "pop_female" = "SP.POP.TOTL.FE.IN",    
+  "pop_0to14y" = "SP.POP.0014.TO",       
+  "pop_15to64y" = "SP.POP.1564.TO",       	
+  "pop_65y+" = "SP.POP.65UP.TO",	
+  "death_rate" = 	"SP.DYN.CDRT.IN",	
+  "pollution" = "EN.ATM.PM25.MC.M3", 
+  "full_vaccination_rate_by_2yrs" = "HF.IMM.FULL",
+  "hosp_beds_per_1000" = "SH.MED.BEDS.ZS", 
+  "undernourishment" = "SN.ITK.DEFC.ZS", 
+  "internet_access" = "IT.NET.USER.ZS",
+  "pop_density" = "EN.POP.DNST",
+  "measles_vaccine" = "SH.IMM.MEAS"
+)
+
+
+pop_data <- wb_data(my_indicators, country = "all", start_date = 2020, end_date = 2022)
+
+
+# Some indicators, like number of deaths, is only shown for regions and not countries. 
+# Many of the data from 2022 is missing and the filtering of dates from the wbstats argument did not fully work.
+# Iso2c column has weird values, along with NA ones. Will proceed to remove values with digits & NA values in iso2c column. We will lose the data that is collected automatically by region.
+# The country column has additional labels that are unnecessary.
+
+
+# Clean the World Bank Dataset 
+pop_data1 <- pop_data %>%
+  filter(date %in% c(2020, 2021, 2022)) %>% # to ensure only 2020:2022 is included
+  filter(!grepl("[0-9]", iso2c) & !is.na(iso2c) & !grepl("countries|only|income|total|blend|Union|&|area|members|North America|Sub", country)   # remove non-valid or unnecessary observations 
+  ) %>%
+  rename(Country = country) %>% # renamed country & date column to match covid dataset
+  rename(Year = date) %>%       
+  select(-iso2c, -iso3c)    # remove the country code columns because they are unnecessary and it is easier to go by the full country name
+
+# Investigating missingness of indicators 
+missing_percentages <- pop_data1 %>%
+  filter(Year %in% c(2020, 2021, 2022)) %>%
+  summarise_all(~mean(is.na(.)) * 100)
+# very high missingness for full vaccination rates, pollution, and hospital beds so these indicators are not included.
+# Proceed to remove them 
+
+pop_data1 <- pop_data1 %>%
+  select(-hosp_beds_per_1000, -full_vaccination_rate_by_2yrs, -pollution )
+
+
+# Investigate differences between country naming in covid vs wb dataset 
+non_matching_results_pop1 <- anti_join(pop_data1, covid_data3, by = "Country")
+non_matching_results_covid1 <- anti_join(covid_data3, pop_data1, by = "Country")
+
+# 96 non-matching results (each country repeated three times, so 32 countries have different name labels in WB compared to Covid dataset). Will rename them to match each other. 
+# Hong Kong, Macao, and Channel Islands are not recognized by WHO, hence they are not present in the Covid dataset; will proceed to remove them.
+
+
+covid_data3 <- covid_data3 %>% 
+  filter(Country != "Anguilla" &
+           Country != "Bonaire" &
+           Country != "Cook Islands" &
+           Country != "Falkland Islands (Malvinas)" &
+           Country != "French Guiana" &
+           Country != "Guadeloupe" &
+           Country != "Guernsey" &
+           Country != "Holy See" &
+           Country != "Jersey" &
+           Country != "Martinique" &
+           Country != "Mayotte" &
+           Country != "Montserrat" &
+           Country != "Niue" &
+           Country != "Pitcairn Islands" &
+           Country != "RÃ©union" &
+           Country != "Saba" &
+           Country != "Saint BarthÃ©lemy" &
+           Country != "Saint Helena, Ascension and Tristan da Cunha" &
+           Country != "Saint Pierre and Miquelon" &
+           Country != "Sint Eustatius" &
+           Country != "Tokelau" &
+           Country != "Wallis and Futuna") %>%
+  mutate(Country = case_when(
+    Country == "Bolivia (Plurinational State of)" ~ "Bolivia", 
+    Country == "CÃ´te dâ€™Ivoire" ~ "Cote d'Ivoire",
+    Country == "CuraÃ§ao" ~ "Curacao",
+    Country == "Micronesia (Federated States of)" ~ "Micronesia, Fed. Sts.", 
+    Country == "The United Kingdom" ~ "United Kingdom", 
+    Country == "Iran (Islamic Republic of)" ~ "Iran, Islamic Rep.",
+    Country == "Republic of Korea" ~ "Korea, Rep.", 
+    Country == "Lao People's Democratic Republic" ~ "Lao PDR",
+    Country == "Republic of Moldova" ~ "Moldova", 
+    Country == "Northern Mariana Islands (Commonwealth of the)" ~ "Northern Mariana Islands", 
+    Country == "Democratic People's Republic of Korea" ~"Korea, Dem. People's Rep.", 
+    Country == "occupied Palestinian territory, including east Jerusalem" ~ "West Bank and Gaza", 
+    Country == "Saint Martin" ~ "St. Martin (French part)", 
+    Country == "Sint Maarten" ~ "Sint Maarten (Dutch part)",
+    Country == "TÃ¼rkiye" ~ "Turkiye", 
+    Country == "United Republic of Tanzania" ~ "Tanzania", 
+    Country == "Saint Vincent and the Grenadines" ~ "St. Vincent and the Grenadines", 
+    Country == "Venezuela (Bolivarian Republic of)" ~ "Venezuela, RB",
+    Country == "United States Virgin Islands" ~ "Virgin Islands (U.S.)",
+    Country == "Viet Nam" ~ "Vietnam",
+    Country == "Kosovo[1]" ~ "Kosovo",
+    TRUE ~ Country))
+
+pop_data1 <- pop_data1 %>%
+  filter(Country != "Channel Islands" & 
+           Country != "Hong Kong SAR, China" & 
+           Country != "Macao SAR, China") %>%
+  mutate(Country = case_when(
+    Country == "Bahamas, The" ~ "Bahamas", 
+    Country == "Congo, Dem. Rep." ~ "Democratic Republic of the Congo",
+    Country == "Congo, Rep." ~ "Congo",
+    Country == "Yemen, Rep." ~ "Yemen",
+    Country == "Egypt, Arab Rep." ~ "Egypt", 
+    Country == "Gambia, The" ~ "Gambia", 
+    Country == "Kyrgyz Republic" ~ "Kyrgyzstan",
+    Country == "St. Kitts and Nevis" ~ "Saint Kitts and Nevis", 
+    Country == "St. Lucia" ~ "Saint Lucia",
+    Country == "Slovak Republic" ~ "Slovakia", 
+    Country == "United States" ~ "United States of America",
+    TRUE ~ Country)) 
+
+# Double check to make sure the naming of the countries is the same in both datasets
+non_matching_results_new1 <- anti_join(pop_data1, covid_data3, by = "Country")
+non_matching_results_new2 <- anti_join(covid_data3, pop_data1, by = "Country")
+# Check number of observations in each to make sure both have the same number
+nrow(pop_data1) 
+nrow(covid_data3)
+
+
+# Step 3: Combine and preprocess data by Country and Year and calculate prevalence & mortality
+merged_data <- pop_data1 %>%
+  left_join(covid_data3, by = c("Country", "Year")) %>% 
+  arrange(Country) %>% # sort it in ascending order
+  mutate(Cumulative_mortality= (Cumulative_deaths/ pop_total)*100) %>%
+  mutate(Mortality_per_year = (Deaths_per_year/ pop_total) * 100) %>% 
+  mutate(Prevalence_per_year = (Cases_per_year / pop_total) * 100)
+
+# Conduct last observation carried forward (LOCF) for gdp, gni, and measles, life expectancy, death rate, internet because the data for these is mainly temporal ( does not drastically change between years) and the most recent observations seem to be in general similar to each other 
+
+LOCF_merged <- merged_data %>% 
+  arrange(Country, Year) %>%  # Ensure data is sorted by Country and date
+  group_by(Country) %>%       # Group by Country
+  select(-undernourishment, -pop_density, -health_expend_gdp) %>% 
+  fill(gdp, gni, measles_vaccine, life_expectancy, death_rate, internet_access, .direction = "down") 
+
+# Some countries have no values at all for the three years for that indicator. Must remove them when conducting anova analysis
+clean_LOCF_merged <- LOCF_merged %>%   
+  filter(!is.na(gdp) & !is.na(gni) & !is.na(measles_vaccine) & !is.na(life_expectancy) & !is.na(death_rate) & !is.na(internet_access))
+
+
+# For percent_undernourishment, health expend., and pop_density indicator, filter it out for 2020 because they only have valid values for this year 
+# Filter out year 2020 and select specified columns for each indicator
+filter_2020_undernourishment <- merged_data %>%
+  filter(Year == "2020") %>%
+  select(undernourishment, Country, Cases_per_year, Deaths_per_year, Mortality_per_year, Prevalence_per_year) %>% 
+  mutate(CFR_2020 = (Deaths_per_year / Cases_per_year)*100)
+
+filter_2020_health_expend <- merged_data %>%
+  filter(Year == "2020") %>%
+  select(health_expend_gdp, Country, Cases_per_year, Deaths_per_year, Mortality_per_year, Prevalence_per_year) %>%
+  mutate(CFR_2020 = (Deaths_per_year / Cases_per_year)*100)
+
+filter_2020_pop_density <- merged_data %>%
+  filter(Year == "2020") %>%
+  select(pop_density, Country, Cases_per_year, Deaths_per_year, Mortality_per_year, Prevalence_per_year) %>%  
+  mutate(CFR_2020 = (Deaths_per_year / Cases_per_year)*100)
+###INDICATOR ANALYSIS###
+
+
+library(corrplot)
+
+# In order to conduct a correlation analysis, we must only assess numeric values and deal with missing values
+# This corr plots point of emphasis is to investigate the relationship of our indicators to cumulative CFR
+yr2022_data_for_cor <- clean_LOCF_merged %>% 
+  filter(Year == 2022) %>%
+  select(-Country, -Year, -Cases_per_year, -Cumulative_cases)
+
+yr2022_data_for_cor <- as.data.frame(lapply(yr2022_data_for_cor, function(x) {
+  if(is.numeric(x)) {
+    x[is.nan(x)] <- NA
+  }
+  return(x)
+}))
+
+covid2022_cor_matrix <- cor(yr2022_data_for_cor[sapply(yr2022_data_for_cor, is.numeric)], use = "complete.obs")
+corrplot(covid2022_cor_matrix, method = "circle")
+
+# Extract correlations related to Cumulative_CFR and remove its own correlation (which will be 1)
+cfr2022_correlations <- covid2022_cor_matrix["Cumulative_CFR", ]
+cfr2022_correlations <- cfr2022_correlations[cfr2022_correlations != 1]
+
+# Sort by magnitude and select top 5
+top_5_indicators2022 <- names(sort(abs(cfr2022_correlations), decreasing = TRUE)[1:5])
+
+top_5_indicators2022
+
+# The top 3 indicators were Internet access, Life expectancy, and Measles Vaccine Rates
+# Now, we will categorize each as Low, Medium, and High
+# Categorize based on internet_access
+yr2022_data_for_cor$internet_access_category <- cut(yr2022_data_for_cor$internet_access, 
+                                                    breaks = quantile(yr2022_data_for_cor$internet_access, probs = c(0, 0.33, 0.66, 1), na.rm = TRUE), 
+                                                    labels = c("Low", "Medium", "High"), 
+                                                    include.lowest = TRUE)
+
+# Categorize based on life_expectancy
+yr2022_data_for_cor$life_expectancy_category <- cut(yr2022_data_for_cor$life_expectancy, 
+                                                    breaks = quantile(yr2022_data_for_cor$life_expectancy, probs = c(0, 0.33, 0.66, 1), na.rm = TRUE), 
+                                                    labels = c("Low", "Medium", "High"), 
+                                                    include.lowest = TRUE)
+
+# Categorize based on measles_vaccine
+yr2022_data_for_cor$measles_vaccine_category <- cut(yr2022_data_for_cor$measles_vaccine, 
+                                                    breaks = quantile(yr2022_data_for_cor$measles_vaccine, probs = c(0, 0.33, 0.66, 1), na.rm = TRUE), 
+                                                    labels = c("Low", "Medium", "High"), 
+                                                    include.lowest = TRUE)
+###ANOVA TESTS
+#Now we will check for significant differences between groups of our indicators using ANOVA tests
+
+# ANOVA for internet_access
+anova_internet <- aov(Cumulative_CFR ~ internet_access_category, data = yr2022_data_for_cor)
+summary(anova_internet)
+
+# ANOVA for life_expectancy
+anova_life <- aov(Cumulative_CFR ~ life_expectancy_category, data = yr2022_data_for_cor)
+summary(anova_life)
+
+# ANOVA for measles_vaccine
+anova_measles <- aov(Cumulative_CFR ~ measles_vaccine_category, data = yr2022_data_for_cor)
+summary(anova_measles)
+
+#TUKEY'S TEST
+#Now we will check to see which groups are different using Tukey's test
+#Internet access
+tukey_internet <- TukeyHSD(anova_internet, "internet_access_category")
+print(tukey_internet)
+#Life Expectancy
+tukey_life <- TukeyHSD(anova_life, "life_expectancy_category")
+print(tukey_life)
+#Measles Vax Rate
+tukey_measles <- TukeyHSD(anova_measles, "measles_vaccine_category")
+print(tukey_measles)
+
+################################################################################
+#CHANGING NaN(not a number) VALUES TO NA
+clean_LOCF_merged2 <- clean_LOCF_merged %>%
+  mutate_all(~ ifelse(. == "NaN", NA, .))
+
+#RENAMING VARIABLE
+clean_LOCF_merged2 <- clean_LOCF_merged2 %>%
+  rename(pop_65yplus = "pop_65y+")
+
+#Creating mean columns for each variable, dont need to apply na.rm since NA's were
+#removed but done just in case
+clean_LOCF_merged3 <- clean_LOCF_merged2 %>%
+  filter(Year %in% c(2020, 2021, 2022)) %>%
+  group_by(Country) %>%
+  summarize(
+    avg_internet_access = mean(internet_access, na.rm = TRUE),
+    avg_gdp = mean(gdp, na.rm = TRUE),
+    avg_gni = mean(gni, na.rm = TRUE),
+    avg_measles_vaccine = mean(measles_vaccine, na.rm = TRUE),
+    avg_death_rate = mean(death_rate, na.rm = TRUE),
+    avg_life_expectancy = mean(life_expectancy, na.rm = TRUE),
+    avg_pop_0to14y = mean(pop_0to14y, na.rm = TRUE),
+    avg_pop_15to64y = mean(pop_15to64y, na.rm = TRUE),
+    avg_pop_65yplus = mean(pop_65yplus, na.rm = TRUE),
+    avg_pop_total = mean(pop_total, na.rm = TRUE),
+    avg_pop_female = mean(pop_female, na.rm = TRUE),
+    avg_pop_male = mean(pop_male, na.rm = TRUE),
+    avg_cumulative_cases = mean(Cumulative_cases, na.rm = TRUE),
+    avg_cumulative_deaths = mean(Cumulative_deaths, na.rm = TRUE),
+    avg_cases_per_year = mean(Cases_per_year, na.rm = TRUE),
+    avg_deaths_per_year = mean(Deaths_per_year, na.rm = TRUE),
+    avg_cumulative_CFR = mean(Cumulative_CFR, na.rm = TRUE)
+  )
+
+clean_LOCF_merged3 <- clean_LOCF_merged3 %>%
+  mutate_all(~ ifelse(. == "NaN", NA, .)) #for some reason the NaN values came back after creation of clean_LOCF_merged3 dataframe
+
+# Extracting unique country-region pairs from regions_dataset and then creating 
+# a regions column in clean_LOCF_merged3 in case we want to do analysis per region
+unique_regions <- clean_LOCF_merged2 %>%
+  select(Country, WHO_region) %>%
+  distinct()
+
+clean_LOCF_merged3 <- clean_LOCF_merged3 %>%
+  left_join(unique_regions, by = "Country")
+
+#Rechecking correlation with new data frame
+# Create a new data frame with only numeric columns
+numeric_data <- clean_LOCF_merged3 %>%
+  select(-Country, -WHO_region)  # Exclude non-numeric columns
+#######Adding Cumulative cases from 2020-2022 as a column in clean_LOCF_merged3 and total population column for prevalence calculation 
+
+# Filtering the data to include only 2022 observations
+data_2022 <- clean_LOCF_merged2 %>%
+  filter(Year == 2022)
+
+cumulative_cases_2022 <- data_2022 %>%
+  group_by(Country) %>%
+  summarize(cumulative_cases_2020_2022 = sum(Cumulative_cases))
+
+clean_LOCF_merged3 <- clean_LOCF_merged3 %>%
+  left_join(cumulative_cases_2022, by = "Country")
+
+pop_total_2022 <- data_2022 %>%
+  group_by(Country) %>%
+  summarize(pop_total_2022 = sum(pop_total))
+
+clean_LOCF_merged3 <- clean_LOCF_merged3 %>%
+  left_join(pop_total_2022, by = "Country")
+# Run the correlation test
+cor_matrix_merged3 <- cor(numeric_data, use = "complete.obs")
+
+# Print the correlation matrix
+print(cor_matrix_merged3)
+
+# Compute the correlation matrix for clean_LOCF_merged3
+cor_matrix <- cor(clean_LOCF_merged3[sapply(clean_LOCF_merged3, is.numeric)], use = "complete.obs")
+
+# Extract correlations related to avg_cumulative_CFR
+cfr_correlations <- cor_matrix["avg_cumulative_CFR", ]
+
+# Remove its own correlation (which will be 1)
+cfr_correlations <- cfr_correlations[cfr_correlations != 1]
+
+# Sort by magnitude and select top 5
+top_5_indicators <- names(sort(abs(cfr_correlations), decreasing = TRUE)[1:5])
+
+top_5_indicators #correlations are the same on the new dataset so we are sticking with our chosen 3 indicators
+
+# Categorizing based on internet_access
+clean_LOCF_merged3$internet_access_category <- cut(clean_LOCF_merged3$avg_internet_access, 
+                                                   breaks = quantile(clean_LOCF_merged3$avg_internet_access, probs = c(0, 0.33, 0.66, 1), na.rm = TRUE), 
+                                                   labels = c("Low", "Medium", "High"), 
+                                                   include.lowest = TRUE)
+
+# Categorizing based on life_expectancy
+clean_LOCF_merged3$life_expectancy_category <- cut(clean_LOCF_merged3$avg_life_expectancy, 
+                                                   breaks = quantile(clean_LOCF_merged3$avg_life_expectancy, probs = c(0, 0.33, 0.66, 1), na.rm = TRUE), 
+                                                   labels = c("Low", "Medium", "High"), 
+                                                   include.lowest = TRUE)
+
+# Categorizing based on measles_vaccine
+clean_LOCF_merged3$measles_vaccine_category <- cut(clean_LOCF_merged3$avg_measles_vaccine, 
+                                                   breaks = quantile(clean_LOCF_merged3$avg_measles_vaccine, probs = c(0, 0.33, 0.66, 1), na.rm = TRUE), 
+                                                   labels = c("Low", "Medium", "High"), 
+                                                   include.lowest = TRUE)
+#Removing remaining NA's(2rows)
+clean_LOCF_merged3 <- na.omit(clean_LOCF_merged3) #TURKIYE AND Cote d'Ivoire REMOVED BECAUSE THEY ARE MISSING ALL DATA FOR cumulative cases, deaths, cases/yr, deaths/yr, cumulative CFR, and WHO region
+
+##ANOVA TESTS
+#Now we will check for significant differences between groups of our indicators using ANOVA tests
+
+# ANOVA for internet_access
+anova_internet_access <- aov(avg_cumulative_CFR ~ internet_access_category, data = clean_LOCF_merged3)
+summary(anova_internet_access)
+# ANOVA for life_expectancy
+anova_life_expectancy <- aov(avg_cumulative_CFR ~ life_expectancy_category, data = clean_LOCF_merged3)
+summary(anova_life_expectancy)
+# ANOVA for measles vaccine rate
+anova_measles_vaccine <- aov(avg_cumulative_CFR ~ measles_vaccine_category, data = clean_LOCF_merged3)
+summary(anova_measles_vaccine)
+
+
+#TUKEY'S TEST
+#Now we will check to see which groups are different using Tukey's test
+#Internet access
+tukey_internet_access <- TukeyHSD(anova_internet_access)
+print(tukey_internet_access)
+#Life Expectancy
+tukey_life_expectancy <- TukeyHSD(anova_life_expectancy)
+print(tukey_life_expectancy)
+#Measles Vaccine Rate
+tukey_measles_vaccine <- TukeyHSD(anova_measles_vaccine)
+print(tukey_measles_vaccine)
+
+
+
+
+#DETERMINING THE QUANTILE RANGES FOR LOW MEDIUM HIGH CATEGORIES
+internet_access_quantile_borders <- quantile(clean_LOCF_merged3$avg_internet_access, 
+                                             probs = c(0, 0.33, 0.66, 1), 
+                                             na.rm = TRUE)
+# Print the quantile borders for Internet Access
+print(internet_access_quantile_borders)
+
+life_expectancy_quantile_borders <- quantile(clean_LOCF_merged3$avg_life_expectancy, 
+                                             probs = c(0, 0.33, 0.66, 1), 
+                                             na.rm = TRUE)
+# Print the quantile borders for Life Expectancy
+print(life_expectancy_quantile_borders)
+
+# Categorize based on measles_vaccine
+measles_vaccine_quantile_borders <- quantile(clean_LOCF_merged3$avg_measles_vaccine, 
+                                             probs = c(0, 0.33, 0.66, 1), 
+                                             na.rm = TRUE)
+# Print the quantile borders for Measles Vaccine Rate
+print(measles_vaccine_quantile_borders)
+
+```
+COVID-19 Case Fatality Rate Heatmap
+================================================================================
+
+Column
+-------------------------------------------------------------------------------
+
+### **Introduction** 
+
+Unveil COVID-19's impact on regions and nations through our dashboard. We focus on Case Fatality Rate (CFR) trends, examining the 2020-2022 period. This tool aims to uncover insights into disease impact, socioeconomic links, and healthcare readiness.
+
+```{r}
+#Creating an interactive heatmap for CFR visualization per country
+heatmap_plot <- plot_geo(clean_LOCF_merged3, locationmode = "country names") %>%
+  add_trace(
+    z = ~avg_cumulative_CFR,
+    locations = ~Country,
+    text = ~paste("Country: ", Country, 
+                  "<br>Measles Vaccination Rank: ", measles_vaccine_category,
+                  "<br>Internet Access Rank: ", internet_access_category,
+                  "<br>Life Expectancy Rank: ", life_expectancy_category,
+                  "<br>Case Fatality Rate: ", avg_cumulative_CFR),
+    hovertemplate = "%{text}<extra></extra>",
+    colorscale = "Reds",
+    colorbar = list(title = "Cumulative CFR")
+  ) %>%
+ config(fig.layout = list(width = 1200, height = 800))
+heatmap_plot
+
+
+```
+
+Row {data-width=200}
+------
+
+### **Supplementary Information**
+
+**Region Codes:**
+
+AFRO - African Region
+
+AMRO - Region of the Americas
+
+EMRO - Eastern Mediterranean Region
+
+EURO - European Region
+
+SEARO - South-East Asian Region
+
+WPRO - Western Pacific Region
+
+**Categories:**
+
+Low, Medium, and High categories are classified based on quantiles. Low corresponds to data falling in the 0 to 33% range, Medium corresponds to data in the 33% to 66% range and High corresponds to data that falls in the upper range from 66 to 100%.
+
+***Measles Vaccination Rate:***
+
+Low: 20 to 81% of children ages 12-23 months
+
+Medium: 81 to 93% of children ages 12-23 months
+
+High: 93 to 100% of children ages 12-23 months
+
+***Life Expectancy Rate:***
+
+Low: 52 to 69 years
+
+Medium: 69 to 74 years
+
+High: 74 to 84 years
+
+***Internet Access:*** 
+
+Low: 5 to 60% of population
+
+Medium: 60 to 82% of population
+
+High: 82 to 100% of population
+
+**Data Used:**
+
+The data used involves average values per country from the years 2020-2022. Note that Turkiye and Cote d'Ivoire were excluded due to unreported data.
+
+**Assumptions:**
+
+1. For missing data a last observation carried forward approach was used, thus we assume this approach introduces limited skewness.
+
+2. We assume a linear relationship between indicators and CFR
+
+3. Data is normally distributed 
+
+4. Aggregation: When we averaged the data by country, we assumed that the average is a good representation of the data for each country.
+
+5. Homoscedasticity
+
+COVID-19 Fatality Rate Predictor Analysis
+================================================================================
+
+Column {.tabset .tabset-fade data-width=650}
+-------------------------------------------------------------------------------
+
+```{r}
+#Creating colour pallete for use in plots
+Regioncolours <- c("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b")
+UniqueRegioncolors <- setNames(Regioncolours, unique(clean_LOCF_merged3$WHO_region))
+```
+
+### **CFR vs Average Measles Vaccination Rate**
+
+```{r}
+#Creating bubble plot for measles vaccination rate vs CFR
+ BBplotMeaslees <- ggplot(clean_LOCF_merged3, aes(x = avg_measles_vaccine, y = avg_cumulative_CFR)) +
+  geom_point(aes(color = WHO_region, size = measles_vaccine_category, text = Country), alpha = 0.7, na.rm = TRUE) +
+  scale_color_manual(values = UniqueRegioncolors) +
+  labs(title = "Measles Vaccination Rate vs COVID-19 Case Fatality Rate by Region",
+       x = "Measles Vaccination Rate",
+       y = "COVID-19 Case Fatality Rate",
+       color = "Region",
+       size = "Measles Vaccination Category") +
+  theme_minimal() +
+  guides(
+    size = guide_legend(title = "Measles Vaccination Category"),
+    color = guide_legend(title = "Region")
+  ) +
+  scale_y_continuous(breaks = seq(0, 8, by = 1), limits = c(0, 8)) +
+  scale_size_manual(values = c(1,3, 5))
+
+# Convert the ggplot plot to an interactive plotly plot
+BBplotMeaslesInteract <- ggplotly(BBplotMeaslees, tooltip = "text")
+
+# Display the interactive plot
+BBplotMeaslesInteract
+```
+
+### **CFR vs Average Life Expectancy**
+
+```{r}
+#Creating barplot for avg life expectancy vs CFR
+summarized_data <- clean_LOCF_merged3 %>%
+  group_by(life_expectancy_category, WHO_region) %>%
+  summarize(total_CFR = sum(avg_cumulative_CFR))
+
+BplotLifeXpec <- plot_ly(
+  data = summarized_data,
+  x = ~life_expectancy_category,
+  y = ~total_CFR,
+  type = "bar",
+  color = ~WHO_region,
+  colors = UniqueRegioncolors,
+  hoverinfo = "y+name"
+) %>%
+  layout(
+    title = "Total Case Fatality Rate (CFR) by Life Expectancy Category and Continent",
+    xaxis = list(title = "Life Expectancy Category"),
+    yaxis = list(title = "Total CFR"),
+    showlegend = TRUE
+  )
+BplotLifeXpec
+
+
+```
+
+###  **Number of Countries per Region with Low, Medium, or High Internet Access**
+
+```{r}
+
+# Creating a summary dataset for plotting
+summary_data <- clean_LOCF_merged3 %>%
+  group_by(internet_access_category, WHO_region) %>%
+  summarise(count = n())
+
+# Creating an interactive Plotly stacked bar chart
+StackedIntAccessInteract <- plot_ly(data = summary_data, x = ~internet_access_category, y = ~count, color = ~WHO_region,
+                                    type = "bar", colors = UniqueRegioncolors) %>%
+  layout(title = "Internet Access Category vs Number of Countries by WHO Region",
+         xaxis = list(title = "Internet Access Category"),
+         yaxis = list(title = "Number of Countries"),
+         barmode = "stack")
+StackedIntAccessInteract
+```
+
+### **CFR vs Average Internet Access Bubble Plot**
+
+```{r}
+#Creating bubble plot for CFR vs Average internet access
+BBchartInternetVsCFR <- ggplot(clean_LOCF_merged3, aes(x = avg_internet_access, y = avg_cumulative_CFR)) +
+  geom_point(aes(color = WHO_region, size = internet_access_category, text = Country), alpha = 0.7) +
+  scale_color_manual(values = UniqueRegioncolors) +
+  labs(title = "Internet Access by Region vs COVID-19 Case Fatality Rate",
+       x = "Average Internet Access",
+       y = "COVID-19 Case Fatality Rate",
+       color = "Region",
+       size = "Internet Access Category") +
+  theme_minimal() +
+  guides(
+    size = guide_legend(title = "Internet Access Category"),
+    color = guide_legend(title = "Region")
+  ) +
+  scale_y_continuous(breaks = seq(0, 8, by = 1), limits = c(0, 8)) +
+  scale_size_manual(values = c(1,3, 5)) 
+
+# Converting from ggplot to plotly
+BBchartInternetVsCFRinteract <- ggplotly(BBchartInternetVsCFR, tooltip = "text")
+BBchartInternetVsCFRinteract
+```
+
+
+Row {data-width=300}
+------
+  
+### **Supplementary Information**
+
+**Region Codes:**
+
+AFRO - African Region
+
+AMRO - Region of the Americas
+
+EMRO - Eastern Mediterranean Region
+
+EURO - European Region
+
+SEARO - South-East Asian Region
+
+WPRO - Western Pacific Region
+
+**Categories:**
+
+Low, Medium, and High categories are classified based on quantiles. Low corresponds to data falling in the 0 to 33% range, Medium corresponds to data in the 33% to 66% range and High corresponds to data that falls in the upper range from 66 to 100%.
+
+***Measles Vaccination Rate:***
+
+Low: 20 to 81% of children ages 12-23 months
+
+Medium: 81 to 93% of children ages 12-23 months
+
+High: 93 to 100% of children ages 12-23 months
+
+***Life Expectancy Rate:***
+
+Low: 52 to 69 years
+
+Medium: 69 to 74 years
+
+High: 74 to 84 years
+
+***Internet Access:*** 
+
+Low: 5 to 60% of population
+
+Medium: 60 to 82% of population
+
+High: 82 to 100% of population
+
+**Data Used:**
+
+The data used involves average values per country from the years 2020-2022. Note that Turkiye and Cote d'Ivoire were excluded due to unreported data.
+
+**Assumptions:**
+
+1. For missing data a last observation carried forward approach was used, thus we assume this approach introduces limited skewness.
+
+2. We assume a linear relationship between indicators and CFR
+
+3. Data is normally distributed 
+
+4. Aggregation: When we averaged the data by country, we assumed that the average is a good representation of the data for each country.
+
+5. Homoscedasticity
+
+COVID-19 Case Fatality Rate per WHO Region 
+===============================================================================
+
+Column {.tabset .tabset-fade data-width=650}
+-------------------------------------------------------------------------------
+
+### **Comparison of WHO Region and COVID-19 CFR**
+```{r}
+# Createing boxplot for comparison betweeen CFR and WHO region using ggplot2
+BXplotRegVsCFR <- ggplot(data = clean_LOCF_merged3, aes(x = WHO_region, y = avg_cumulative_CFR)) +
+  geom_boxplot(aes(fill = WHO_region)) +
+  labs(title = "Comparison of WHO Region and COVID-19 Case Fatality Rate (CFR)",
+       x = "WHO Region",
+       y = "Average Cumulative CFR (%)",
+       fill = "WHO Region") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_manual(values = UniqueRegioncolors)  # Set custom colors for fill
+
+# Convert from ggplot to plotly
+BXplotRegVsCFRint <- ggplotly(BXplotRegVsCFR)
+
+# Display the interactive Plotly chart
+BXplotRegVsCFRint
+```
+
+### **COVID-19 Case Prevalence by WHO Region**
+```{r}
+# Calculated the prevalence of CFR per WHO region
+case_prevalence <- clean_LOCF_merged3 %>%
+  group_by(WHO_region) %>%
+  summarize(prevalence = sum(cumulative_cases_2020_2022) / sum(pop_total_2022) * 100)
+
+# Creating an interactive pie chart for case prevalence using plot_ly
+prevalence_pie_chart <- plot_ly(data = case_prevalence, labels = ~WHO_region, values = ~prevalence, type = "pie") %>%
+  layout(title = "COVID-19 Case Prevalence by WHO Region",
+         showlegend = TRUE) %>%
+  add_trace(marker = list(colors = Regioncolours[as.character(case_prevalence$WHO_region)]))
+prevalence_pie_chart
+```
+
+### **Mean COVID-19 CFR per WHO Region**
+```{r}
+# Creating a ggplot bar chart with hover text labels
+Bchart_CFRvsReg <- ggplot(data = clean_LOCF_merged3, aes(x = WHO_region, y = avg_cumulative_CFR, fill = WHO_region)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Mean Case Fatality Rate (CFR) per WHO Region",
+       x = "WHO Region",
+       y = "Mean CFR (%)") +
+  scale_fill_manual(values = UniqueRegioncolors) +  # Apply color palette
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none")
+
+# Converting the ggplot chart to an interactive plotly chart
+interactive_bar_chart <- ggplotly(Bchart_CFRvsReg, tooltip = c("y", "fill"))
+interactive_bar_chart
+
+```
+
+Row {data-width=200}
+------
+
+### **Supplementary Information**
+
+***Region Codes:***
+
+AFRO - African Region
+
+AMRO - Region of the Americas
+
+EMRO - Eastern Mediterranean Region
+
+EURO - European Region
+
+SEARO - South-East Asian Region
+
+WPRO - Western Pacific Region
+
+**Data Used:**
+
+The data used involves average values per country from the years 2020-2022. Note that Turkiye and Cote d'Ivoire were excluded due to unreported data.
+
+**Assumptions:**
+
+1. For missing data a last observation carried forward approach was used, thus we assume this approach introduces limited skewness.
+
+2. We assume a linear relationship between indicators and CFR
+
+3. Data is normally distributed 
+
+4. Aggregation: When we averaged the data by country, we assumed that the average is a good representation of the data for each country.
+
+5. Homoscedasticity
+
+References
+===============================================================================
+
+1. WHO Coronavirus (COVID-19) Dashboard. https://covid19.who.int.
+
+2. World Bank Group - International Development, Poverty, & Sustainability. World Bank https://www.worldbank.org/en/home.
+
+3. R: The R Project for Statistical Computing. https://www.r-project.org/.
